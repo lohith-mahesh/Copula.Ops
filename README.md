@@ -1,6 +1,6 @@
 # Copula.Ops
 
-**Institutional-Grade Statistical Arbitrage Engine for NSE Pairs Trading.**
+**Statistical Arbitrage Engine for NSE Pairs Trading.**
 
 Full-stack quantitative analysis engine for identifying, analyzing, and backtesting mean-reverting stock pairs. Processes the **Nifty 500 & Microcap 250** universe (~750 stocks) to detect statistical inefficiencies using advanced econometrics.
 
