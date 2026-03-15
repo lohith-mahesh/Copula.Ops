@@ -19,8 +19,8 @@ import time
 
 CACHE_FILE = "Cache.csv"
 LOOKBACK_YEARS = 2
-MIN_CORR = 0.90
-MAX_HURST = 0.50
+MIN_CORR = 0.80
+MAX_HURST = 0.55
 ROLLING_WINDOW = 60
 MIN_TURNOVER = 5000000 
 HOST = "0.0.0.0"
@@ -135,7 +135,9 @@ def scan_market(data):
             s1 = data[t1].dropna()
             s2 = data[t2].dropna()
             common = s1.index.intersection(s2.index)
-            if len(common) < 150: continue
+            if len(common) < 150: 
+                print(f"Skipping {t1}-{t2}: Only {len(common)} days of data.")
+                continue
             score, p_val, _ = coint(s1[common], s2[common])
             if p_val < 0.05:
                 spread = s1[common] / s2[common]
@@ -150,7 +152,8 @@ def scan_market(data):
                         "hurst": round(float(hurst), 3), 
                         "sector": SECTOR_MAP.get(t1, "Market")
                     })
-        except:
+        except Exception as e:
+            print(f"Failed on {t1} and {t2}: {str(e)}")
             continue
     return sorted(results, key=lambda x: x['hurst'])
 
