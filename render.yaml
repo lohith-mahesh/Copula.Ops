@@ -1,0 +1,14 @@
+services:
+  - type: web
+    name: copula-ops
+    runtime: python
+    plan: starter # "Starter" tier prevents the app from "sleeping"
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn -w 1 -k uvicorn.workers.UvicornWorker app:app --bind 0.0.0.0:$PORT
+    disk:
+      name: market-cache
+      mountPath: /opt/render/project/src/data
+      sizeGB: 1
+    envVars:
+      - key: CACHE_FILE
+        value: /opt/render/project/src/data/Cache.csv
