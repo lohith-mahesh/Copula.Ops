@@ -56,7 +56,7 @@ def get_liquid_universe():
     return list(tickers)
 
 def get_incremental_data(existing_df):
-    """Fetches only the missing dates since last update"""
+    """Fetches missing days since last update"""
     last_date = pd.to_datetime(existing_df.index).max()
     today = datetime.now()
     if today - last_date > timedelta(days=1):
@@ -77,7 +77,7 @@ def get_incremental_data(existing_df):
     return existing_df
 
 def check_single_pair(pair_indices, data):
-    """Math extracted for Joblib parallelization"""
+    """Parallelized math for pair validation"""
     t1, t2 = pair_indices
     try:
         s1, s2 = data[t1].dropna(), data[t2].dropna()
@@ -95,18 +95,22 @@ def check_single_pair(pair_indices, data):
 
 def run_background_pipeline():
     global SYSTEM_STATUS, DATA_READY, MARKET_DATA, CACHED_SCAN_RESULTS
-    if not os.path.exists(DISK_DIR): os.makedirs(DISK_DIR, exist_ok=True)
     
-    # Migrate Seed from Git to Disk if necessary
+    if not os.path.exists(DISK_DIR): 
+        os.makedirs(DISK_DIR, exist_ok=True)
+    
+    # 1. MIGRATION LOGIC: Move from Git to Persistent Disk if it's the first run
     if not os.path.exists(DISK_CACHE) and os.path.exists(GIT_CACHE):
-        SYSTEM_STATUS = "Migrating Seed..."
+        SYSTEM_STATUS = "Migrating Seed Data..."
         shutil.copy(GIT_CACHE, DISK_CACHE)
+        print("Migration complete: Cache.csv is now on the Persistent Disk.")
 
+    # 2. DATA SYNC: Always work from DISK_CACHE from now on
     if os.path.exists(DISK_CACHE):
         SYSTEM_STATUS = "Syncing Delta..."
         df = pd.read_csv(DISK_CACHE, index_col=0, parse_dates=True)
         MARKET_DATA = get_incremental_data(df)
-        MARKET_DATA.to_csv(DISK_CACHE)
+        MARKET_DATA.to_csv(DISK_CACHE) # Save updates back to disk
     else:
         SYSTEM_STATUS = "Full Download..."
         all_tickers = get_liquid_universe()
@@ -120,7 +124,10 @@ def run_background_pipeline():
         MARKET_DATA.to_csv(DISK_CACHE)
 
     DATA_READY = True
+    
+    # 3. SCAN: Parallel math
     SYSTEM_STATUS = "Scanning Market..."
+    get_liquid_universe() # Refresh sector map
     corr_matrix = MARKET_DATA.corr().abs()
     mask = np.triu(np.ones(corr_matrix.shape), k=1).astype(bool)
     candidates = corr_matrix.where(mask).stack()
@@ -131,6 +138,11 @@ def run_background_pipeline():
     SYSTEM_STATUS = f"Ready ({len(MARKET_DATA.columns)} Stocks)"
 
 app = FastAPI()
+
+class AnalyzeRequest(BaseModel):
+    t1: str
+    t2: str
+    z_threshold: float = 2.0 
 
 @app.on_event("startup")
 async def startup():
@@ -147,8 +159,29 @@ async def scan(): return {"pairs": CACHED_SCAN_RESULTS}
 
 @app.post("/analyze")
 async def analyze(req: AnalyzeRequest):
-    # (Same analysis logic as before, using MARKET_DATA)
-    pass
+    try:
+        p1, p2 = MARKET_DATA[req.t1].dropna(), MARKET_DATA[req.t2].dropna()
+        common = p1.index.intersection(p2.index)
+        p1, p2 = p1[common], p2[common]
+        cov = p1.rolling(window=ROLLING_WINDOW).cov(p2)
+        var = p2.rolling(window=ROLLING_WINDOW).var()
+        rolling_hr = (cov / var).fillna(1.0)
+        spread = p1 - (rolling_hr * p2)
+        z_score = (spread - spread.rolling(ROLLING_WINDOW).mean()) / spread.rolling(ROLLING_WINDOW).std()
+        valid_idx = z_score.dropna().index
+        z_score, p1, p2, rolling_hr = z_score.loc[valid_idx], p1.loc[valid_idx], p2.loc[valid_idx], rolling_hr.loc[valid_idx]
+        returns = (p1.pct_change() - (rolling_hr.shift(1) * p2.pct_change())) * pd.Series(0, index=valid_idx).mask(z_score > req.z_threshold, -1).mask(z_score < -req.z_threshold, 1).ffill().shift(1)
+        equity = (1 + returns.fillna(0)).cumprod()
+        def clean(s): return s.replace({np.nan: None}).tolist()
+        return {
+            "dates": valid_idx.strftime('%Y-%m-%d').tolist(),
+            "norm_price1": clean((p1 / p1.iloc[0]) - 1),
+            "norm_price2": clean((p2 / p2.iloc[0]) - 1),
+            "mi": clean((z_score - z_score.min()) / (z_score.max() - z_score.min())),
+            "equity": clean(equity),
+            "stats": {"hedge_ratio": round(float(rolling_hr.iloc[-1]), 4), "current_z": round(float(z_score.iloc[-1]), 2), "sharpe": round(float((returns.mean()/returns.std())*np.sqrt(252)), 2) if returns.std() != 0 else 0}
+        }
+    except: return {"error": "Failed"}
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
