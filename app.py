@@ -178,10 +178,10 @@ async def get_ui():
     return FileResponse('index.html')
 
 @app.post("/scan")
-async def scan():
+def scan():
     if not DATA_READY: return {"error": "Processing..."}
     return {"pairs": scan_market(market_data)}
-
+    
 @app.post("/analyze")
 async def analyze(req: AnalyzeRequest):
     try:
