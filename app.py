@@ -31,6 +31,7 @@ logging.getLogger('yfinance').setLevel(logging.CRITICAL)
 SYSTEM_STATUS = "Booting..."
 DATA_READY = False
 SECTOR_MAP = {}
+SCAN_RESULTS = []
 
 def get_liquid_universe():
     global SECTOR_MAP
@@ -48,7 +49,7 @@ def get_liquid_universe():
                     if sym not in SECTOR_MAP:
                         SECTOR_MAP[sym] = row.get('Industry', 'Microcap')
         except Exception as e:
-            print(f"Failed to fetch index: {url} | {e}")
+            pass
 
     fetch_indices("https://archives.nseindia.com/content/indices/ind_nifty500list.csv", 'Industry')
     fetch_indices("https://archives.nseindia.com/content/indices/ind_niftymicrocap250_list.csv", 'Microcap')
@@ -80,8 +81,16 @@ def download_batched(tickers):
         try:
             df = yf.download(batch, period=f"{LOOKBACK_YEARS}y", progress=False, threads=True, auto_adjust=True)
             if isinstance(df.columns, pd.MultiIndex):
-                clean_batch = clean_liquidity(df['Close'], df['Volume'])
+                if 'Close' in df.columns.levels[0]:
+                    prices = df['Close']
+                    volumes = df['Volume']
+                else:
+                    prices = df.xs('Close', level=1, axis=1)
+                    volumes = df.xs('Volume', level=1, axis=1)
+                    
+                clean_batch = clean_liquidity(prices, volumes)
                 if not clean_batch.empty:
+                    clean_batch.index = pd.to_datetime(clean_batch.index).tz_localize(None).normalize()
                     all_data.append(clean_batch)
         except Exception as e:
             pass
@@ -90,7 +99,7 @@ def download_batched(tickers):
     return pd.concat(all_data, axis=1)
 
 def update_cache():
-    global SYSTEM_STATUS, DATA_READY
+    global SYSTEM_STATUS
     SYSTEM_STATUS = "Syncing Data..."
     
     if os.path.exists(CACHE_FILE):
@@ -101,8 +110,6 @@ def update_cache():
         df = df.loc[:, ~df.columns.duplicated()]
         df.to_csv(CACHE_FILE)
         
-    DATA_READY = True
-    SYSTEM_STATUS = f"Ready ({len(df.columns)} Symbols)"
     return df
 
 def calculate_rolling_hedge_ratio(y, x, window=60):
@@ -129,6 +136,7 @@ def scan_market(data):
     mask = np.triu(np.ones(corr_matrix.shape), k=1).astype(bool)
     candidates = corr_matrix.where(mask).stack()
     candidates = candidates[candidates > MIN_CORR]
+    
     results = []
     for t1, t2 in candidates.index.tolist():
         try:
@@ -136,7 +144,6 @@ def scan_market(data):
             s2 = data[t2].dropna()
             common = s1.index.intersection(s2.index)
             if len(common) < 150: 
-                print(f"Skipping {t1}-{t2}: Only {len(common)} days of data.")
                 continue
             score, p_val, _ = coint(s1[common], s2[common])
             if p_val < 0.05:
@@ -153,9 +160,23 @@ def scan_market(data):
                         "sector": SECTOR_MAP.get(t1, "Market")
                     })
         except Exception as e:
-            print(f"Failed on {t1} and {t2}: {str(e)}")
             continue
+            
     return sorted(results, key=lambda x: x['hurst'])
+
+def background_initialization():
+    global market_data, SYSTEM_STATUS, DATA_READY, SCAN_RESULTS
+    try:
+        market_data = update_cache()
+        SYSTEM_STATUS = "Running Econometrics..."
+        print("Data loaded. Starting heavy math matrix...")
+        SCAN_RESULTS = scan_market(market_data)
+        print(f"Math complete. Found {len(SCAN_RESULTS)} valid pairs.")
+        SYSTEM_STATUS = f"Ready ({len(market_data.columns)} Symbols)"
+        DATA_READY = True
+    except Exception as e:
+        print(f"Initialization Failed: {e}")
+        SYSTEM_STATUS = "System Failure"
 
 app = FastAPI()
 market_data = None
@@ -167,7 +188,7 @@ class AnalyzeRequest(BaseModel):
 
 @app.on_event("startup")
 async def startup():
-    threading.Thread(target=lambda: globals().update(market_data=update_cache())).start()
+    threading.Thread(target=background_initialization).start()
 
 @app.get("/status")
 async def get_status():
@@ -180,10 +201,10 @@ async def get_ui():
 @app.post("/scan")
 def scan():
     if not DATA_READY: return {"error": "Processing..."}
-    return {"pairs": scan_market(market_data)}
-    
+    return {"pairs": SCAN_RESULTS}
+
 @app.post("/analyze")
-async def analyze(req: AnalyzeRequest):
+def analyze(req: AnalyzeRequest):
     try:
         p1 = market_data[req.t1].dropna()
         p2 = market_data[req.t2].dropna()
