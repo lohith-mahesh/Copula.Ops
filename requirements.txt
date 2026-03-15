@@ -1,8 +1,9 @@
 fastapi
 uvicorn[standard]
+gunicorn
 numpy
 pandas
 yfinance
 statsmodels
 requests
-gunicorn
+joblib
