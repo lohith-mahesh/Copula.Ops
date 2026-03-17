@@ -1,243 +1,131 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8"><title>Copula.OPS</title>
+    <meta charset="UTF-8"><title>Copula.Ops</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
     <script src="https://cdn.plot.ly/plotly-2.24.1.min.js"></script>
     <style>
-        body { background-color: #000000; color: #ffffff !important; font-family: 'Courier New', monospace; letter-spacing: -0.5px; }
-        .text-muted, .text-secondary, small { color: #ffffff !important; opacity: 1; }
+        /* Force all text white and background black */
+        * { color: #ffffff !important; }
+        body { background-color: #000; font-family: 'Courier New', monospace; margin:0; height: 100vh; overflow: hidden; }
         
-        /* Tables */
-        .table { --bs-table-bg: #000000; border-color: #ffffff; }
-        .table thead th { 
-            border-bottom: 2px solid #ffffff; 
-            color: #ffffff !important; 
-            position: sticky; top: 0; background: #000; 
-            vertical-align: middle !important; 
-            height: 50px; cursor: help;
-        }
-        .table td { border-bottom: 1px solid #444; vertical-align: middle; padding: 12px; color: #ffffff !important; }
-        tbody tr:hover { background-color: #222; cursor: pointer; border-left: 4px solid #ffffff; }
+        .sidebar { height: 100vh; border-right: 1px solid #fff; overflow-y: auto; background: #000; }
+        .main-content { height: 100vh; display: flex; flex-direction: column; background: #000; overflow-y: auto; }
         
-        /* Metrics */
-        .stat-val { font-size: 1.6rem; border-bottom: 2px solid #ffffff; margin-bottom: 5px; font-weight: bold; }
-        .stat-label { font-size: 0.8rem; font-weight: bold; letter-spacing: 1px; cursor: help; text-decoration: underline dotted; }
-        .chart-header { font-size: 0.75rem; font-weight: bold; padding: 5px 0 0 10px; cursor: help; }
+        .table { --bs-table-bg: #000; font-size: 0.8rem; border-color: #fff; }
+        .table td { border-bottom: 1px solid #333; vertical-align: middle; cursor: pointer; padding: 12px; }
+        .table th { border-bottom: 1px solid #fff !important; text-transform: uppercase; font-size: 0.7rem; }
+        tr:hover { background-color: #111 !important; border-left: 3px solid #fff; }
         
-        /* Controls */
-        .form-select { background-color: #000; color: #fff; border: 1px solid #fff; border-radius: 0; }
+        .stat-val { font-size: 1.1rem; border-bottom: 1px solid #fff; font-weight: bold; display: inline-block; padding-top:2px; min-width: 40px; }
+        .stat-label { font-size: 0.55rem; letter-spacing: 1px; text-transform: uppercase; margin-top: 4px; opacity: 0.8; }
         
-        input[type=range] { -webkit-appearance: none; width: 100%; background: transparent; margin: 5px 0; }
-        input[type=range]:focus { outline: none; }
-        
-        /* Custom Slider Track & Thumb */
-        input[type=range]::-webkit-slider-runnable-track {
-            width: 100%; height: 4px; cursor: pointer;
-            background: #444; border-radius: 2px; border: 1px solid #000;
-        }
-        input[type=range]::-webkit-slider-thumb {
-            -webkit-appearance: none; height: 16px; width: 16px;
-            border-radius: 50%; background: #ffffff;
-            cursor: pointer; margin-top: -6px;
-            box-shadow: 0 0 3px rgba(0,0,0,0.8);
-        }
+        .progress { background-color: #222; height: 4px; border-radius: 0; }
+        .progress-bar { background-color: #fff !important; }
 
-        /* Scrollbar */
-        ::-webkit-scrollbar { width: 8px; }
-        ::-webkit-scrollbar-track { background: #000; }
-        ::-webkit-scrollbar-thumb { background: #666; border: 1px solid #000; }
+        /* Hardened White Slider */
+        .slider-container { padding: 30px 0; }
+        input[type=range] { -webkit-appearance: none; width: 100%; background: transparent; cursor: pointer; outline: none; }
+        input[type=range]::-webkit-slider-runnable-track { height: 8px; background: #ffffff !important; border-radius: 4px; }
+        input[type=range]::-moz-range-track { height: 8px; background: #ffffff !important; border-radius: 4px; }
+        input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; border: 3px solid #000; height: 22px; width: 22px; border-radius: 50%; background: #fff !important; margin-top: -8px; }
+
+        .chart-box { flex-grow: 1; width: 100%; border-bottom: 1px solid #333; min-height: 350px; }
+        .sizer-box { background: #111; border: 1px solid #333; padding: 15px; margin: 10px; font-size: 0.75rem; text-transform: uppercase; }
+        
+        .top-settings { background: #000; border-bottom: 1px solid #333; padding: 10px 20px; display: flex; align-items: center; gap: 20px; }
+        input[type=number] { background: #111; color: #fff !important; border: 1px solid #444; padding: 2px 10px; outline: none; }
+        
+        ::-webkit-scrollbar { width: 4px; }
+        ::-webkit-scrollbar-thumb { background: #fff; }
     </style>
 </head>
 <body>
 <div class="container-fluid p-0">
-    <div class="d-flex justify-content-between align-items-center p-3 border-bottom border-white">
-        <h4 class="mb-0 fw-bold">Copula.Ops</h4>
-        <span id="sysStatus" class="small fw-bold">BOOTING</span>
-    </div>
-
     <div class="row g-0">
-        <div class="col-md-3 border-end border-white" style="height: 93vh; overflow-y: auto;">
-            <div class="p-2 border-bottom border-white">
-                <select id="secFilter" class="form-select form-select-sm" onchange="filterData()"><option>ALL SECTORS</option></select>
+        <div class="col-md-3 sidebar">
+            <div class="p-3 border-bottom border-white">
+                <h5 class="fw-bold mb-1">Copula.Ops</h5>
+                <div id="sysStatus" class="small mb-1">BOOTING 0%</div>
+                <div class="progress mb-3"><div id="progressBar" class="progress-bar" style="width: 0%"></div></div>
+                <div class="slider-container">
+                    <div class="d-flex justify-content-between mb-2"><label class="small fw-bold">CORRELATION FILTER</label><b id="corrVal" class="small">0.85</b></div>
+                    <input type="range" id="corrSlider" min="0.3" max="1.0" step="0.01" value="0.85" oninput="filterByCorr(this.value)">
+                </div>
             </div>
-            <table class="table mb-0">
-                <thead>
-                    <tr>
-                        <th class="ps-3">PAIR</th>
-                        <th title="Hurst Exponent: < 0.5 is Mean Reverting">HURST 🛈</th>
-                        <th title="Cointegration P-Value: < 0.05 is good">COINT 🛈</th>
-                    </tr>
-                </thead>
+            <table class="table table-sm mb-0">
+                <thead><tr><th class="ps-3">PAIR</th><th>VALIDITY</th></tr></thead>
                 <tbody id="resTable"></tbody>
             </table>
         </div>
-
-        <div class="col-md-9" style="height: 93vh; overflow-y: auto;">
-            <div class="row g-0 border-bottom border-white text-center">
-                <div class="col p-3 border-end border-white">
-                    <div class="stat-val" id="val_z">--</div>
-                    <div class="stat-label" title="Current Z-Score">ROLLING Z 🛈</div>
-                </div>
-                <div class="col p-3 border-end border-white">
-                    <div class="stat-val" id="val_ou">--</div>
-                    <div class="stat-label" title="Equilibrium Price">OU TARGET 🛈</div>
-                </div>
-                <div class="col p-3 border-end border-white">
-                    <div class="stat-val" id="val_hr">--</div>
-                    <div class="stat-label" title="Beta (Hedge Ratio)">HEDGE RATIO 🛈</div>
-                </div>
-                <div class="col p-3 border-end border-white">
-                    <div class="stat-val" id="val_hl">--</div>
-                    <div class="stat-label" title="Days to Revert">HALF-LIFE 🛈</div>
-                </div>
-                <div class="col p-3">
-                    <div class="stat-val" id="val_sh">--</div>
-                    <div class="stat-label" title="Risk Adjusted Return">SHARPE RATIO 🛈</div>
-                </div>
+        <div class="col-md-9 main-content">
+            <div class="top-settings">
+                <label class="small fw-bold">PORTFOLIO BUDGET (₹):</label>
+                <input type="number" id="portfolioBudget" value="1000000" oninput="calculateSizing()">
+                <small id="lastUpdated" style="opacity: 0.6; margin-left: auto;"></small> </div>
+            <div class="row g-0 text-center border-bottom border-white py-2">
+                <div class="col"><div class="stat-val" id="val_z">--</div><div class="stat-label">COPULA PROB</div></div>
+                <div class="col"><div class="stat-val" id="val_prob">--</div><div class="stat-label">P(REVERT)</div></div>
+                <div class="col-3"><div class="stat-val" id="val_lead">--</div><div class="stat-label">LEAD-LAG</div></div>
+                <div class="col"><div class="stat-val" id="val_hr">--</div><div class="stat-label">KALMAN HR</div></div>
             </div>
-
-            <div class="row g-0">
-                <div class="col-md-8 border-end border-white border-bottom border-white">
-                    <div class="chart-header">NORMALIZED RETURN (%)</div>
-                    <div id="chartPrice" style="height:350px;"></div>
-                </div>
-                <div class="col-md-4 border-bottom border-white">
-                    <div class="chart-header">PROBABILITY STRUCTURE</div>
-                    <div id="chartCop" style="height:350px;"></div>
-                </div>
-            </div>
-
-            <div class="row g-0 border-bottom border-white">
-                <div class="col-12">
-                    <div class="chart-header">ROLLING Z-SCORE SIGNAL</div>
-                    <div id="chartSig" style="height:200px;"></div>
-                </div>
-            </div>
-
-            <div class="row g-0">
-                <div class="col-12 position-relative">
-                    <div class="d-flex align-items-center border-bottom border-white p-2">
-                        <span class="chart-header me-3">BACKTEST EQUITY</span>
-                        <div class="d-flex align-items-center ms-auto me-4" style="width: 300px;">
-                            <label class="small me-2">THRESHOLD: <span id="threshVal">2.0</span></label>
-                            <input type="range" id="zSlider" min="1.0" max="3.0" step="0.1" value="2.0" oninput="updateThreshLabel()" onchange="reAnalyze()">
-                        </div>
-                    </div>
-                    <div id="chartEq" style="height:200px;"></div>
-                </div>
-            </div>
+            <div id="chartPrice" class="chart-box"></div>
+            <div id="chartSig" style="height:220px; width:100%;"></div>
+            <div class="sizer-box" id="posSizer">SELECT A PAIR TO CALCULATE SIZING</div>
         </div>
     </div>
 </div>
-
 <script>
-    let scanResults = [];
-    let currentPair = {t1: null, t2: null};
-    let autoScanTriggered = false;
-    
-    const PLOT_LAYOUT = { 
-        paper_bgcolor:'#000', plot_bgcolor:'#000', 
-        font:{color:'#fff', family:'Courier New', weight:'bold'}, 
-        margin:{t:10,b:30,l:40,r:20}, 
-        showlegend:false, 
-        xaxis:{gridcolor:'#444', linecolor:'#fff'}, 
-        yaxis:{gridcolor:'#444', linecolor:'#fff'}
-    };
-    
-    // Poll for status
+    let rawPairs = [], currentAnalysis = null;
+    const LAYOUT = { paper_bgcolor:'#000', plot_bgcolor:'#000', font:{color:'#fff', family:'Courier New'}, margin:{t:40,b:40,l:60,r:30}, xaxis:{gridcolor:'#222', linecolor:'#fff'}, yaxis:{gridcolor:'#222', linecolor:'#fff'}, showlegend:false };
+
     setInterval(async () => {
-        const r = await fetch('/status'); 
-        const d = await r.json();
-        document.getElementById('sysStatus').innerText = d.status.toUpperCase();
-        if(d.ready && !autoScanTriggered) { 
-            autoScanTriggered = true; 
-            runScan(); 
-        }
-    }, 1500);
+        try {
+            const r = await fetch('/status'), d = await r.json();
+            document.getElementById('sysStatus').innerText = `${d.status} ${d.progress}%`;
+            document.getElementById('progressBar').style.width = `${d.progress}%`;
+            if(d.ready && document.getElementById('resTable').children.length === 0) runScan();
+        } catch(e){}
+    }, 1200);
 
-    async function runScan(){
-        const r = await fetch('/scan', {method:'POST'}); 
-        const d = await r.json();
-        scanResults = d.pairs || []; 
-        
-        renderTable(scanResults);
-        
-        // Populate Filter
-        const sectors = [...new Set(scanResults.map(p => p.sector))];
-        const f = document.getElementById('secFilter');
-        sectors.forEach(s => f.innerHTML += `<option>${s}</option>`);
+    async function runScan() {
+        const r = await fetch('/scan', {method:'POST'}), d = await r.json();
+        rawPairs = d.pairs || []; filterByCorr(document.getElementById('corrSlider').value);
     }
 
-    function renderTable(data){
-        const tbody = document.getElementById('resTable'); 
-        tbody.innerHTML = '';
-        data.forEach(p => {
-            const tr = document.createElement('tr'); 
-            tr.onclick = () => { currentPair = {t1: p.t1, t2: p.t2}; analyze(); };
-            tr.innerHTML = `
-                <td class="ps-3">
-                    <span style="font-weight:bold; font-size:1.1em;">${p.t1.split('.')[0]}<br>${p.t2.split('.')[0]}</span>
-                    <br><span style="font-size:0.8em; opacity:0.8;">${p.sector}</span>
-                </td>
-                <td>${p.hurst}</td>
-                <td>${p.p_value}</td>`;
-            tbody.appendChild(tr);
-        });
+    function filterByCorr(val) {
+        document.getElementById('corrVal').innerText = val;
+        const filtered = rawPairs.filter(p => p.correlation >= parseFloat(val));
+        document.getElementById('resTable').innerHTML = filtered.map(p => `
+            <tr onclick="analyze('${p.t1}', '${p.t2}')">
+                <td class="ps-3"><b>${p.t1.split('.')[0]}/${p.t2.split('.')[0]}</b><br><small style="opacity:0.7; font-size:0.6rem;">${p.sector}</small></td>
+                <td style="color:${p.validity > 75 ? '#fff' : '#888'}">${p.validity}%</td>
+            </tr>`).join('');
     }
 
-    function filterData(){
-        const s = document.getElementById('secFilter').value;
-        renderTable(s === 'ALL SECTORS' ? scanResults : scanResults.filter(p => p.sector === s));
+    async function analyze(t1, t2) {
+        const r = await fetch('/analyze', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({t1, t2})});
+        const d = await r.json(); currentAnalysis = { ...d, t1, t2 };
+        document.getElementById('val_z').innerText = (d.stats.copula * 100).toFixed(1) + '%';
+        document.getElementById('val_prob').innerText = d.stats.prob + '%';
+        document.getElementById('val_hr').innerText = d.stats.hr;
+        document.getElementById('val_lead').innerText = d.stats.lead; 
+        document.getElementById('lastUpdated').innerText = `ANALYSIS: ${t1.split('.')[0]}/${t2.split('.')[0]}`;
+        calculateSizing();
+        const futX = Array.from({length: 15}, (_, i) => `+${i+1}d`);
+        setTimeout(() => {
+            Plotly.newPlot('chartPrice', [{x:d.dates, y:d.p1, name:t1, line:{color:'#fff'}}, {x:d.dates, y:d.p2, name:t2, line:{color:'#666'}}], {...LAYOUT, title: 'NORMALIZED PERFORMANCE (%)'});
+            const traces = [{x:d.dates, y:d.z, name:'Residuals', line:{color:'#fff', width:2}}, {x:futX, y:d.mc.upper, line:{width:0}}, {x:futX, y:d.mc.lower, fill:'tonexty', fillcolor:'rgba(255,255,255,0.15)', line:{width:0}}];
+            Plotly.newPlot('chartSig', traces, {...LAYOUT, title: 'RESIDUALS + WALK-FORWARD PROJECTION'});
+        }, 50);
     }
-    
-    function updateThreshLabel() {
-        document.getElementById('threshVal').innerText = document.getElementById('zSlider').value;
-    }
 
-    function reAnalyze() {
-        if(currentPair.t1) analyze();
-    }
-
-    async function analyze(){
-        if(!currentPair.t1) return;
-        const thresh = parseFloat(document.getElementById('zSlider').value);
-        
-        const r = await fetch('/analyze', {
-            method:'POST', 
-            headers:{'Content-Type':'application/json'}, 
-            body:JSON.stringify({...currentPair, z_threshold: thresh})
-        });
-        const d = await r.json();
-        
-        if(d.error) return;
-
-        // Update Stats
-        document.getElementById('val_z').innerText = d.stats.current_z;
-        document.getElementById('val_hr').innerText = d.stats.hedge_ratio;
-        document.getElementById('val_hl').innerText = d.stats.half_life;
-        document.getElementById('val_sh').innerText = d.stats.sharpe;
-        document.getElementById('val_ou').innerText = d.stats.ou_target;
-
-        // Charts
-        Plotly.newPlot('chartPrice', [
-            {x:d.dates, y:d.norm_price1, name:currentPair.t1, line:{color:'#fff', width:2}}, 
-            {x:d.dates, y:d.norm_price2, name:currentPair.t2, line:{color:'#888', width:2}}
-        ], PLOT_LAYOUT);
-        
-        Plotly.newPlot('chartCop', [{
-            x:d.mi, y:d.norm_price1, mode:'markers', marker:{color:'#fff', size:3}
-        }], PLOT_LAYOUT);
-        
-        Plotly.newPlot('chartSig', [
-            {x:d.dates, y:d.mi, line:{color:'#fff', width:1}}, 
-            {x:[d.dates[0], d.dates.slice(-1)[0]], y:[thresh,thresh], line:{dash:'dash', color:'#888'}}, 
-            {x:[d.dates[0], d.dates.slice(-1)[0]], y:[-thresh,-thresh], line:{dash:'dash', color:'#888'}}
-        ], PLOT_LAYOUT);
-        
-        Plotly.newPlot('chartEq', [{
-            x:d.dates, y:d.equity, fill:'tozeroy', line:{color:'#fff', width:1}
-        }], PLOT_LAYOUT);
+    function calculateSizing() {
+        if (!currentAnalysis) return;
+        const budget = parseFloat(document.getElementById('portfolioBudget').value) || 0;
+        const q1 = Math.floor((budget / 2) / currentAnalysis.prices.p1);
+        const q2 = Math.floor(q1 / Math.abs(currentAnalysis.stats.hr));
+        document.getElementById('posSizer').innerHTML = `<b>DYNAMIC SIZING:</b> BUY ${q1} of ${currentAnalysis.t1.split('.')[0]} | SELL ${q2} of ${currentAnalysis.t2.split('.')[0]}`;
     }
 </script>
 </body>
