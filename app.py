@@ -19,8 +19,6 @@ import os
 warnings.filterwarnings("ignore")
 
 app = FastAPI()
-
-# Absolute path for Docker/Cloud environments
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 templates = Jinja2Templates(directory=BASE_DIR)
 
@@ -32,6 +30,7 @@ class GlobalState:
         self.data = pd.DataFrame()
         self.sector_map = {}
         self.pairs_pool = []
+        self.last_sync = "NEVER"
 
 state = GlobalState()
 
@@ -49,54 +48,52 @@ class AnalyzeRequest(BaseModel):
     t1: str
     t2: str
 
+
 def get_copula_score(z_series):
-    """Maps residuals to a uniform space to find tail-end dependency probabilities."""
     if len(z_series) < 30: return 0.5
     u = rankdata(z_series) / (len(z_series) + 1)
     return u[-1]
 
 def calculate_validity(z_series, p_oos, hurst, alpha_bonf):
-    """Aggregates p-values, mean-reversion persistence, and tail-risk into a validity %."""
     p_score = 50 if p_oos < alpha_bonf else (np.interp(p_oos, [alpha_bonf, 0.05], [40, 0]))
     h_score = np.interp(hurst, [0.3, 0.5, 0.6], [30, 10, 0])
     k_score = np.interp(abs(kurtosis(z_series.dropna())), [0, 3, 6], [20, 10, 0])
     return int(p_score + h_score + k_score)
 
 def run_friction_mc(z_series, steps=15, sims=500):
-    """Simulates 500 future paths with volatility-adjusted transaction friction."""
     recent = z_series.tail(30)
     y, x = recent.values[1:], recent.values[:-1]
     res = np.polyfit(x, y, 1)
-    lambda_hat, sigma_hat = np.clip(1 - res[0], 0.02, 0.8), np.std(y - (res[0] * x + res[1]))
-    friction = sigma_hat * 0.05 
+    l_hat, s_hat = np.clip(1 - res[0], 0.02, 0.8), np.std(y - (res[0] * x + res[1]))
+    fric = s_hat * 0.05 
     last_z, paths = z_series.iloc[-1], np.zeros((sims, steps))
     for i in range(sims):
         curr = last_z
         for t in range(steps):
-            curr += lambda_hat * (0 - curr) + sigma_hat * np.random.normal() + (friction if curr < 0 else -friction)
+            curr += l_hat * (0 - curr) + s_hat * np.random.normal() + (fric if curr < 0 else -fric)
             paths[i, t] = curr
     return {"upper": np.percentile(paths, 95, axis=0).tolist(), "lower": np.percentile(paths, 5, axis=0).tolist()}, round((np.sum(np.any(np.abs(paths) < 0.1, axis=1)) / sims) * 100, 1)
 
 def kalman_filter_spread(y, x):
-    """Estimates a dynamic hedge ratio using a recursive state-space model."""
     obs_mat = np.vstack([x, np.ones(len(x))]).T[:, np.newaxis]
     delta, obs_cov = 1e-5, 1e-3
-    trans_cov = delta / (1 - delta) * np.eye(2)
-    state_means, m, c = np.zeros((len(y), 2)), np.zeros(2), np.ones((2, 2))
+    t_cov = delta / (1 - delta) * np.eye(2)
+    means, m, c = np.zeros((len(y), 2)), np.zeros(2), np.ones((2, 2))
     for i in range(len(y)):
-        c += trans_cov
+        c += t_cov
         v = y[i] - np.dot(obs_mat[i], m)
         F = np.dot(obs_mat[i], np.dot(c, obs_mat[i].T)) + obs_cov
         K = np.dot(c, obs_mat[i].T) / (F + 1e-10)
         m += K.flatten() * v
         c -= np.dot(K, np.dot(obs_mat[i], c))
-        state_means[i] = m
-    return state_means[:, 0], state_means[:, 1]
+        means[i] = m
+    return means[:, 0], means[:, 1]
+
 
 def sync_market_data():
-    """Builds a ~730+ stock universe by merging Nifty 500 and Smallcap 250."""
+    """Builds and validates the Nifty 750 universe."""
     state.status = "FETCHING"
-    combined_tickers = []
+    combined = []
     sources = [
         "https://archives.nseindia.com/content/indices/ind_nifty500list.csv",
         "https://archives.nseindia.com/content/indices/ind_niftysmallcap250list.csv"
@@ -107,13 +104,12 @@ def sync_market_data():
             df = pd.read_csv(io.StringIO(r.text))
             for _, row in df.iterrows():
                 sym = f"{row['Symbol'].strip()}.NS"
-                combined_tickers.append(sym)
+                combined.append(sym)
                 state.sector_map[sym] = row.get('Industry', 'Market')
         except: continue
 
-    tickers = sorted(list(set(combined_tickers))) 
+    tickers = sorted(list(set(combined))) 
     all_data = []
-    
     for i in range(0, len(tickers), 50):
         state.progress = int((i/len(tickers)) * 50)
         batch = yf.download(tickers[i:i+50], period="2y", progress=False)
@@ -123,7 +119,6 @@ def sync_market_data():
     state.data = pd.concat(all_data, axis=1).dropna(thresh=250, axis=1).ffill().iloc[-500:]
     state.status = "VALIDATING"
     
-    # Walk-forward: test cointegration in IS period, verify in OOS period
     split = int(len(state.data) * 0.75)
     f_data, v_data = state.data.iloc[:split], state.data.iloc[split:]
     corr_matrix = f_data.corr()
@@ -142,8 +137,8 @@ def sync_market_data():
                 if p_oos < 0.15:
                     spread = state.data[t1] / state.data[t2]
                     hurst = np.polyfit(np.log(range(2, 20)), [np.sqrt(np.std(np.subtract(spread.values[l:], spread.values[:-l]))) for l in range(2, 20)], 1)[0] * 2.0
-                    z_series = (spread - spread.mean()) / (spread.std() + 1e-10)
-                    validity = calculate_validity(z_series, p_oos, hurst, alpha_bonf)
+                    z = (spread - spread.mean()) / (spread.std() + 1e-10)
+                    validity = calculate_validity(z, p_oos, hurst, alpha_bonf)
                     
                     r1, r2 = state.data[t1].pct_change().fillna(0), state.data[t2].pct_change().fillna(0)
                     corrs = [r1.shift(l).corr(r2) for l in range(-5, 6)]
@@ -158,21 +153,32 @@ def sync_market_data():
                     })
             if len(pairs) >= 150: break 
         except: continue
-    state.pairs_pool = pairs; state.ready, state.progress, state.status = True, 100, "READY"
+    
+    state.pairs_pool = pairs
+    state.last_sync = time.strftime("%H:%M:%S") # Update the time tag
+    state.ready, state.progress, state.status = True, 100, "READY"
+
+def market_monitor_loop():
+    """The infinite daemon loop for institutional persistence."""
+    while True:
+        sync_market_data()
+        time.sleep(14400) # Sleep for 4 hours before the next universe rotation
 
 @app.on_event("startup")
 async def startup():
-    threading.Thread(target=sync_market_data, daemon=True).start()
+    threading.Thread(target=market_monitor_loop, daemon=True).start()
 
 @app.get("/status")
-async def get_status(): return {"status": state.status, "progress": state.progress, "ready": state.ready}
+async def get_status(): 
+    return {"status": state.status, "progress": state.progress, "ready": state.ready, "last_sync": state.last_sync}
 
 @app.get("/", response_class=HTMLResponse)
 async def home(request: Request):
     return templates.TemplateResponse("index.html", {"request": request})
 
 @app.post("/scan")
-async def scan(): return {"pairs": state.pairs_pool}
+async def scan(): 
+    return {"pairs": state.pairs_pool, "last_sync": state.last_sync}
 
 @app.post("/analyze", response_class=SafeJSON)
 async def analyze(req: AnalyzeRequest):
