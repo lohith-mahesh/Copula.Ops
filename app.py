@@ -16,6 +16,7 @@ import time
 import json
 import os
 
+# Filter out the noise from yfinance and statsmodels
 warnings.filterwarnings("ignore")
 
 app = FastAPI()
@@ -23,6 +24,10 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 templates = Jinja2Templates(directory=BASE_DIR)
 
 class GlobalState:
+    """
+    Centralizing state in RAM. This is the 'Source of Truth' that the 
+    background daemon updates every 4 hours.
+    """
     def __init__(self):
         self.status = "BOOTING..."
         self.progress = 0
@@ -35,6 +40,10 @@ class GlobalState:
 state = GlobalState()
 
 class SafeJSON(JSONResponse):
+    """
+    Standard JSON fails on NaNs/Infs produced by statistical outliers.
+    We force-clean them here to keep the frontend from crashing.
+    """
     def render(self, content) -> bytes:
         def clean(obj):
             if isinstance(obj, dict): return {k: clean(v) for k, v in obj.items()}
@@ -48,19 +57,30 @@ class AnalyzeRequest(BaseModel):
     t1: str
     t2: str
 
-
 def get_copula_score(z_series):
+    """
+    Gaussian Copula transform. We map the spread into a uniform distribution [0,1].
+    Values near 1 or 0 indicate a breakdown in the historical dependency structure.
+    """
     if len(z_series) < 30: return 0.5
     u = rankdata(z_series) / (len(z_series) + 1)
     return u[-1]
 
 def calculate_validity(z_series, p_oos, hurst, alpha_bonf):
+    """
+    Hybrid scoring. We penalize high p-values, trending spreads (Hurst), 
+    and extreme fat-tails (Kurtosis). A high validity pair is statistically robust.
+    """
     p_score = 50 if p_oos < alpha_bonf else (np.interp(p_oos, [alpha_bonf, 0.05], [40, 0]))
     h_score = np.interp(hurst, [0.3, 0.5, 0.6], [30, 10, 0])
     k_score = np.interp(abs(kurtosis(z_series.dropna())), [0, 3, 6], [20, 10, 0])
     return int(p_score + h_score + k_score)
 
 def run_friction_mc(z_series, steps=15, sims=500):
+    """
+    Monte Carlo paths with a 'friction' penalty. If the spread is thin, 
+    slippage kills the trade. We simulate it using a volatility-scaled drag.
+    """
     recent = z_series.tail(30)
     y, x = recent.values[1:], recent.values[:-1]
     res = np.polyfit(x, y, 1)
@@ -70,11 +90,16 @@ def run_friction_mc(z_series, steps=15, sims=500):
     for i in range(sims):
         curr = last_z
         for t in range(steps):
+            # Mean reverting simulation logic
             curr += l_hat * (0 - curr) + s_hat * np.random.normal() + (fric if curr < 0 else -fric)
             paths[i, t] = curr
     return {"upper": np.percentile(paths, 95, axis=0).tolist(), "lower": np.percentile(paths, 5, axis=0).tolist()}, round((np.sum(np.any(np.abs(paths) < 0.1, axis=1)) / sims) * 100, 1)
 
 def kalman_filter_spread(y, x):
+    """
+    Recursive State-Space model. Unlike a static OLS beta, the Kalman filter 
+    adapts the hedge ratio in real-time as the relationship drifts.
+    """
     obs_mat = np.vstack([x, np.ones(len(x))]).T[:, np.newaxis]
     delta, obs_cov = 1e-5, 1e-3
     t_cov = delta / (1 - delta) * np.eye(2)
@@ -89,9 +114,12 @@ def kalman_filter_spread(y, x):
         means[i] = m
     return means[:, 0], means[:, 1]
 
-
 def sync_market_data():
-    """Builds and validates the Nifty 750 universe."""
+    """
+    Heavy lifting. Pulls Nifty 500 + Smallcap 250, cleans them, and tests for 
+    cointegration across 750+ tickers. This uses Bonferroni correction 
+    to handle the massive multiple-testing bias.
+    """
     state.status = "FETCHING"
     combined = []
     sources = [
@@ -108,20 +136,26 @@ def sync_market_data():
                 state.sector_map[sym] = row.get('Industry', 'Market')
         except: continue
 
+    # Deduplicate tickers to avoid redundant calculations
     tickers = sorted(list(set(combined))) 
     all_data = []
+    # 50-stock chunks to stay within yfinance/RAM limits comfortably
     for i in range(0, len(tickers), 50):
         state.progress = int((i/len(tickers)) * 50)
         batch = yf.download(tickers[i:i+50], period="2y", progress=False)
         if not batch.empty and 'Close' in batch: all_data.append(batch['Close'])
         time.sleep(0.05)
 
+    # 500 trading days lookback (~2 years)
     state.data = pd.concat(all_data, axis=1).dropna(thresh=250, axis=1).ffill().iloc[-500:]
     state.status = "VALIDATING"
     
+    # Walk-forward validation (75% In-sample, 25% Out-of-sample)
     split = int(len(state.data) * 0.75)
     f_data, v_data = state.data.iloc[:split], state.data.iloc[split:]
     corr_matrix = f_data.corr()
+    
+    # Filter for reasonable correlation bounds
     indices = np.where((corr_matrix.values > 0.4) & (corr_matrix.values < 0.99))
     unique_idx = sorted(list(set(tuple(sorted((i, j))) for i, j in zip(*indices) if i != j)))
     alpha_bonf = 0.05 / len(unique_idx) if unique_idx else 0.05
@@ -131,15 +165,19 @@ def sync_market_data():
         state.progress = 50 + int((idx / len(unique_idx)) * 50)
         t1, t2 = state.data.columns[i], state.data.columns[j]
         try:
+            # First pass: Cointegration in formation period
             _, p_is, _ = coint(f_data[t1], f_data[t2])
             if p_is < 0.05:
+                # Second pass: Persistence in validation period
                 _, p_oos, _ = coint(v_data[t1], v_data[t2])
                 if p_oos < 0.15:
                     spread = state.data[t1] / state.data[t2]
+                    # Hurst Exponent for stationarity check
                     hurst = np.polyfit(np.log(range(2, 20)), [np.sqrt(np.std(np.subtract(spread.values[l:], spread.values[:-l]))) for l in range(2, 20)], 1)[0] * 2.0
                     z = (spread - spread.mean()) / (spread.std() + 1e-10)
                     validity = calculate_validity(z, p_oos, hurst, alpha_bonf)
                     
+                    # Lead-Lag cross correlation shift detection
                     r1, r2 = state.data[t1].pct_change().fillna(0), state.data[t2].pct_change().fillna(0)
                     corrs = [r1.shift(l).corr(r2) for l in range(-5, 6)]
                     best_lag = range(-5, 6)[np.nanargmax(np.abs(corrs))]
@@ -151,21 +189,23 @@ def sync_market_data():
                         "lead": lag_label,
                         "sector": f"{s1} (INTRA)" if s1 == s2 else f"{s1[:5]}/{s2[:5]} (INTER)"
                     })
+            # Limit the pool to the best 150 to keep the UI snappy
             if len(pairs) >= 150: break 
         except: continue
     
     state.pairs_pool = pairs
-    state.last_sync = time.strftime("%H:%M:%S") # Update the time tag
+    state.last_sync = time.strftime("%H:%M:%S") 
     state.ready, state.progress, state.status = True, 100, "READY"
 
 def market_monitor_loop():
-    """The infinite daemon loop for institutional persistence."""
+    """Background thread ensures the universe is rotated every 4 hours."""
     while True:
         sync_market_data()
-        time.sleep(14400) # Sleep for 4 hours before the next universe rotation
+        time.sleep(14400) 
 
 @app.on_event("startup")
 async def startup():
+    # daemon=True ensures the thread dies when the main process stops
     threading.Thread(target=market_monitor_loop, daemon=True).start()
 
 @app.get("/status")
@@ -199,4 +239,5 @@ async def analyze(req: AnalyzeRequest):
     except: return {"error": "FAILED"}
 
 if __name__ == "__main__":
+    # Standard HF port
     uvicorn.run(app, host="0.0.0.0", port=7860)
