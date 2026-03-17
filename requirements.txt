@@ -1,9 +1,9 @@
 fastapi
-uvicorn[standard]
-gunicorn
-numpy
+uvicorn
+jinja2
 pandas
+numpy
 yfinance
 statsmodels
+scipy
 requests
-joblib
