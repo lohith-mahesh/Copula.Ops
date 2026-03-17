@@ -1,48 +1,41 @@
-# Copula.Ops
+# Copula.Ops | Statistical Arbitrage Terminal
 
-**Statistical Arbitrage Engine for NSE Pairs Trading.**
+A high-frequency research environment designed for alpha discovery within the Nifty 750 universe. This project moves beyond static OLS (Ordinary Least Squares) models by utilizing state-space estimation and tail-dependency modeling to identify high-probability mean-reversion opportunities.
 
-Full-stack quantitative analysis engine for identifying, analyzing, and backtesting mean-reverting stock pairs. Processes the **Nifty 500 & Microcap 250** universe (~750 stocks) to detect statistical inefficiencies using advanced econometrics.
+![Terminal Dashboard](Demo.png)
 
-Implements a multi-stage filtering process involving Cointegration tests, Hurst Exponents, and Ornstein-Uhlenbeck process fitting. Eliminates look-ahead bias via rolling window calculations for Z-Scores and Hedge Ratios.
+## Core Technical Architecture
 
-## Interface
+### 1. Dynamic State Estimation (Kalman Filter)
+The engine utilizes a Recursive Kalman Filter to estimate the hedge ratio ($\beta$) between two assets. Unlike static regressions, this approach treats $\beta$ as a hidden state that evolves over time. This allows the model to adjust for changing market conditions and maintain a more accurate residual (spread) calculation.
 
-![Dashboard Demo](Demo.png)
-*Real-time analysis dashboard showing rolling Z-Scores, Cointegration metrics, and interactive backtest equity curve.*
+### 2. Tail-Dependency Modeling (Gaussian Copula)
+To account for the non-normal distribution and fat-tails often found in financial spreads, the model applies a Probability Integral Transform (PIT) to the residuals. 
+* It maps residuals into a uniform space $[0, 1]$.
+* It uses a Gaussian Copula to determine the "Copula Probability."
+* This provides a more rigorous measure of divergence than a standard Z-score by identifying true statistical extremes.
 
----
+### 3. Walk-Forward Validation
+To mitigate look-ahead bias and overfitting, the engine implements a 75/25 temporal split:
+* **Formation Period (75%):** Identifies initial cointegration via the Engle-Granger test.
+* **Validation Period (25%):** Verifies that the cointegration relationship survives a regime shift.
+Pairs that fail to maintain stationarity in the out-of-sample period are automatically discarded.
 
-## Quantitative Methodology
+### 4. Monte Carlo Projection & Friction
+The terminal runs 500-path simulations for selected pairs to estimate the probability of reversion within a 15-day window. These simulations incorporate a "Dynamic Friction" penalty, which scales transaction costs relative to the historical volatility of the spread to ensure realistic projections.
 
-### 1. Liquidity Filtering
-Ensures execution viability before statistical analysis.
-* **Criterion:** Rejects assets with median daily turnover (`Price * Volume`) < ₹5,000,000.
-* **Data Quality:** Excludes assets with >20% zero-return days to filter out circuit-limited or illiquid instruments.
+## Logic Stack
+* **Language:** Python 3.11+
+* **Backend:** FastAPI (Asynchronous endpoint handling)
+* **Frontend:** Vanilla JS, Plotly.js, Bootstrap 5 (Responsive Dark Theme)
+* **Data Source:** YFinance API (NSE India)
+* **Statistics:** Statsmodels (ADF/Coint), SciPy (Copula/Kurtosis)
 
-### 2. Pair Selection
-Scans the liquid universe for high-probability mean-reversion candidates using a tiered approach:
-1.  **Correlation:** Pearson correlation > 0.90.
-2.  **Cointegration:** Engle-Granger two-step test. Pairs accepted only if residuals are stationary ($p < 0.05$).
-3.  **Hurst Exponent:** Filters for mean-reverting random walks ($H < 0.5$).
+## Execution Parameters
+* **Universe:** Nifty 500 + Nifty Smallcap 250 (De-duplicated)
+* **Lookback:** 2 Years of historical daily close data
+* **Search Rigor:** Bonferroni Correction applied to p-values to account for multiple testing bias across the 750-stock matrix.
+* **Sizing:** Real-time dollar-neutral position sizing based on user-defined portfolio budget and current Kalman hedge ratio.
 
-### 3. Signal Generation
-Calculated using strictly historical data windows to prevent look-ahead bias.
-* **Rolling OLS:** 60-day window for dynamic Hedge Ratio ($\beta$).
-* **Z-Score Calculation:** Standardized spread using rolling mean and deviation:
-    $$Z_t = \frac{Spread_t - \mu_{60}}{\sigma_{60}}$$
-
-### 4. Ornstein-Uhlenbeck Modeling
-Fits spread data to the OU stochastic differential equation ($dx_t = \theta(\mu - x_t)dt + \sigma dW_t$) to derive the **Half-Life** (expected time to mean reversion).
-
----
-
-## Project Structure
-
-```text
-Copula.Ops/
-├── app.py              # Application entry point (FastAPI + Logic)
-├── index.html          # Dashboard interface
-├── requirements.txt    # Dependencies
-├── Cache.csv           # Local market data storage
-└── README.md           # Documentation
+## Deployment
+The project is containerized via Docker and optimized for environments with high-RAM availability (16GB+) to handle the $N^2$ complexity of the 750-stock correlation matrix.
