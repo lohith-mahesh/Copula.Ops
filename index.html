@@ -5,7 +5,7 @@
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
     <script src="https://cdn.plot.ly/plotly-2.24.1.min.js"></script>
     <style>
-        /* Force all text white and background black */
+        /* Global Reset to High-Contrast Black & White */
         * { color: #ffffff !important; }
         body { background-color: #000; font-family: 'Courier New', monospace; margin:0; height: 100vh; overflow: hidden; }
         
@@ -20,21 +20,21 @@
         .stat-val { font-size: 1.1rem; border-bottom: 1px solid #fff; font-weight: bold; display: inline-block; padding-top:2px; min-width: 40px; }
         .stat-label { font-size: 0.55rem; letter-spacing: 1px; text-transform: uppercase; margin-top: 4px; opacity: 0.8; }
         
-        .progress { background-color: #222; height: 4px; border-radius: 0; }
+        .progress { background-color: #222; height: 4px; border-radius: 0; border: 1px solid #333; }
         .progress-bar { background-color: #fff !important; }
 
-        /* Hardened White Slider */
+        /* Hardened Slider CSS - Range 0.3 to 1.0 */
         .slider-container { padding: 30px 0; }
         input[type=range] { -webkit-appearance: none; width: 100%; background: transparent; cursor: pointer; outline: none; }
         input[type=range]::-webkit-slider-runnable-track { height: 8px; background: #ffffff !important; border-radius: 4px; }
         input[type=range]::-moz-range-track { height: 8px; background: #ffffff !important; border-radius: 4px; }
         input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; border: 3px solid #000; height: 22px; width: 22px; border-radius: 50%; background: #fff !important; margin-top: -8px; }
 
-        .chart-box { flex-grow: 1; width: 100%; border-bottom: 1px solid #333; min-height: 350px; }
-        .sizer-box { background: #111; border: 1px solid #333; padding: 15px; margin: 10px; font-size: 0.75rem; text-transform: uppercase; }
+        .chart-box { flex-grow: 1; width: 100%; border-bottom: 1px solid #333; min-height: 380px; }
+        .sizer-box { background: #111; border: 1px solid #333; padding: 15px; margin: 10px; font-size: 0.75rem; text-transform: uppercase; letter-spacing: 1px; }
         
         .top-settings { background: #000; border-bottom: 1px solid #333; padding: 10px 20px; display: flex; align-items: center; gap: 20px; }
-        input[type=number] { background: #111; color: #fff !important; border: 1px solid #444; padding: 2px 10px; outline: none; }
+        input[type=number] { background: #111; color: #fff !important; border: 1px solid #444; padding: 4px 12px; outline: none; }
         
         ::-webkit-scrollbar { width: 4px; }
         ::-webkit-scrollbar-thumb { background: #fff; }
@@ -48,49 +48,76 @@
                 <h5 class="fw-bold mb-1">Copula.Ops</h5>
                 <div id="sysStatus" class="small mb-1">BOOTING 0%</div>
                 <div class="progress mb-3"><div id="progressBar" class="progress-bar" style="width: 0%"></div></div>
+                
                 <div class="slider-container">
-                    <div class="d-flex justify-content-between mb-2"><label class="small fw-bold">CORRELATION FILTER</label><b id="corrVal" class="small">0.85</b></div>
+                    <div class="d-flex justify-content-between mb-2">
+                        <label class="small fw-bold">CORRELATION FILTER</label>
+                        <b id="corrVal" class="small">0.85</b>
+                    </div>
                     <input type="range" id="corrSlider" min="0.3" max="1.0" step="0.01" value="0.85" oninput="filterByCorr(this.value)">
                 </div>
             </div>
+            
             <table class="table table-sm mb-0">
                 <thead><tr><th class="ps-3">PAIR</th><th>VALIDITY</th></tr></thead>
                 <tbody id="resTable"></tbody>
             </table>
         </div>
+
         <div class="col-md-9 main-content">
             <div class="top-settings">
                 <label class="small fw-bold">PORTFOLIO BUDGET (₹):</label>
                 <input type="number" id="portfolioBudget" value="1000000" oninput="calculateSizing()">
-                <small id="lastUpdated" style="opacity: 0.6; margin-left: auto;"></small> </div>
+                <small id="lastUpdated" style="opacity: 0.6; margin-left: auto; font-size: 0.65rem; letter-spacing: 1px;"></small>
+            </div>
+
             <div class="row g-0 text-center border-bottom border-white py-2">
                 <div class="col"><div class="stat-val" id="val_z">--</div><div class="stat-label">COPULA PROB</div></div>
                 <div class="col"><div class="stat-val" id="val_prob">--</div><div class="stat-label">P(REVERT)</div></div>
                 <div class="col-3"><div class="stat-val" id="val_lead">--</div><div class="stat-label">LEAD-LAG</div></div>
                 <div class="col"><div class="stat-val" id="val_hr">--</div><div class="stat-label">KALMAN HR</div></div>
             </div>
+
             <div id="chartPrice" class="chart-box"></div>
             <div id="chartSig" style="height:220px; width:100%;"></div>
-            <div class="sizer-box" id="posSizer">SELECT A PAIR TO CALCULATE SIZING</div>
+            
+            <div class="sizer-box" id="posSizer">SELECT A PAIR TO CALCULATE NEUTRAL POSITION SIZING</div>
         </div>
     </div>
 </div>
+
 <script>
     let rawPairs = [], currentAnalysis = null;
-    const LAYOUT = { paper_bgcolor:'#000', plot_bgcolor:'#000', font:{color:'#fff', family:'Courier New'}, margin:{t:40,b:40,l:60,r:30}, xaxis:{gridcolor:'#222', linecolor:'#fff'}, yaxis:{gridcolor:'#222', linecolor:'#fff'}, showlegend:false };
+    const LAYOUT = { 
+        paper_bgcolor:'#000', 
+        plot_bgcolor:'#000', 
+        font:{color:'#fff', family:'Courier New'}, 
+        margin:{t:40,b:40,l:60,r:30}, 
+        xaxis:{gridcolor:'#222', linecolor:'#fff'}, 
+        yaxis:{gridcolor:'#222', linecolor:'#fff'}, 
+        showlegend:false 
+    };
 
+    // Keep UI synced with background monitor
     setInterval(async () => {
         try {
             const r = await fetch('/status'), d = await r.json();
             document.getElementById('sysStatus').innerText = `${d.status} ${d.progress}%`;
             document.getElementById('progressBar').style.width = `${d.progress}%`;
+            
+            // Inject the background sync time into the header
+            if(d.last_sync !== "NEVER") {
+                document.getElementById('lastUpdated').innerText = `UNIVERSE SYNC: ${d.last_sync}`;
+            }
+
             if(d.ready && document.getElementById('resTable').children.length === 0) runScan();
         } catch(e){}
     }, 1200);
 
     async function runScan() {
         const r = await fetch('/scan', {method:'POST'}), d = await r.json();
-        rawPairs = d.pairs || []; filterByCorr(document.getElementById('corrSlider').value);
+        rawPairs = d.pairs || []; 
+        filterByCorr(document.getElementById('corrSlider').value);
     }
 
     function filterByCorr(val) {
@@ -105,27 +132,50 @@
 
     async function analyze(t1, t2) {
         const r = await fetch('/analyze', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({t1, t2})});
-        const d = await r.json(); currentAnalysis = { ...d, t1, t2 };
+        const d = await r.json(); 
+        
+        if (d.error) return alert("Analysis Failed. Check server logs.");
+        
+        currentAnalysis = { ...d, t1, t2 };
+        
+        // Map stats to UI
         document.getElementById('val_z').innerText = (d.stats.copula * 100).toFixed(1) + '%';
         document.getElementById('val_prob').innerText = d.stats.prob + '%';
         document.getElementById('val_hr').innerText = d.stats.hr;
         document.getElementById('val_lead').innerText = d.stats.lead; 
-        document.getElementById('lastUpdated').innerText = `ANALYSIS: ${t1.split('.')[0]}/${t2.split('.')[0]}`;
+        
         calculateSizing();
+        
         const futX = Array.from({length: 15}, (_, i) => `+${i+1}d`);
         setTimeout(() => {
-            Plotly.newPlot('chartPrice', [{x:d.dates, y:d.p1, name:t1, line:{color:'#fff'}}, {x:d.dates, y:d.p2, name:t2, line:{color:'#666'}}], {...LAYOUT, title: 'NORMALIZED PERFORMANCE (%)'});
-            const traces = [{x:d.dates, y:d.z, name:'Residuals', line:{color:'#fff', width:2}}, {x:futX, y:d.mc.upper, line:{width:0}}, {x:futX, y:d.mc.lower, fill:'tonexty', fillcolor:'rgba(255,255,255,0.15)', line:{width:0}}];
-            Plotly.newPlot('chartSig', traces, {...LAYOUT, title: 'RESIDUALS + WALK-FORWARD PROJECTION'});
+            // Price Chart
+            Plotly.newPlot('chartPrice', [
+                {x:d.dates, y:d.p1, name:t1, line:{color:'#fff', width:2}}, 
+                {x:d.dates, y:d.p2, name:t2, line:{color:'#666', width:1.5}}
+            ], {...LAYOUT, title: 'NORMALIZED PERFORMANCE (%)'});
+
+            // Signal & MC Projection
+            const traces = [
+                {x:d.dates, y:d.z, name:'Residuals', line:{color:'#fff', width:2}}, 
+                {x:futX, y:d.mc.upper, line:{width:0}}, 
+                {x:futX, y:d.mc.lower, fill:'tonexty', fillcolor:'rgba(255,255,255,0.15)', line:{width:0}}
+            ];
+            Plotly.newPlot('chartSig', traces, {...LAYOUT, title: 'DYNAMIC SPREAD + MC PROJECTION'});
         }, 50);
     }
 
     function calculateSizing() {
         if (!currentAnalysis) return;
         const budget = parseFloat(document.getElementById('portfolioBudget').value) || 0;
+        // Allocate 50% of budget to the long and 50% to the short relative to the hedge ratio
         const q1 = Math.floor((budget / 2) / currentAnalysis.prices.p1);
         const q2 = Math.floor(q1 / Math.abs(currentAnalysis.stats.hr));
-        document.getElementById('posSizer').innerHTML = `<b>DYNAMIC SIZING:</b> BUY ${q1} of ${currentAnalysis.t1.split('.')[0]} | SELL ${q2} of ${currentAnalysis.t2.split('.')[0]}`;
+        
+        document.getElementById('posSizer').innerHTML = `
+            <b>ORDER EXECUTION:</b> BUY ${q1} ${currentAnalysis.t1.split('.')[0]} | 
+            SELL ${q2} ${currentAnalysis.t2.split('.')[0]} 
+            <small style="opacity:0.5; margin-left:10px;">(NEUTRALIZED @ HR ${currentAnalysis.stats.hr})</small>
+        `;
     }
 </script>
 </body>
