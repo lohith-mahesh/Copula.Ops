@@ -2,298 +2,195 @@ import uvicorn
 import numpy as np
 import pandas as pd
 import yfinance as yf
-from fastapi import FastAPI
-from fastapi.responses import FileResponse
+from fastapi import FastAPI, Request
+from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
-import statsmodels.api as sm
 from statsmodels.tsa.stattools import coint
-import logging
-import os
+from scipy.stats import kurtosis, norm, rankdata
 import requests
 import io
 import threading
 import warnings
-import math
-import webbrowser
-import traceback
 import time
+import json
+import os
 
-## Config
-CACHE_FILE = "Cache.csv"
-LOOKBACK_YEARS = 2
-MIN_CORR = 0.90
-MAX_HURST = 0.50
-ROLLING_WINDOW = 60
-MIN_TURNOVER = 5000000 
-HOST = "127.0.0.1"
-PORT = 8000
-BATCH_SIZE = 50
-
-# Setup
 warnings.filterwarnings("ignore")
-logging.getLogger('yfinance').setLevel(logging.CRITICAL)
-
-# Global State
-SYSTEM_STATUS = "Booting..."
-DATA_READY = False
-SECTOR_MAP = {}
-
-# Core Logic
-def get_liquid_universe():
-    """Fetches Nifty 500 and Microcap 250 tickers from NSE."""
-    global SECTOR_MAP
-    tickers = set()
-    headers = {'User-Agent': 'Mozilla/5.0'}
-    
-    # Helper to fetch and parse
-    def fetch_indices(url, sector_key):
-        try:
-            r = requests.get(url, headers=headers)
-            if r.status_code == 200:
-                df = pd.read_csv(io.StringIO(r.text))
-                for _, row in df.iterrows():
-                    sym = f"{row['Symbol'].strip()}.NS"
-                    tickers.add(sym)
-                    if sym not in SECTOR_MAP:
-                        SECTOR_MAP[sym] = row.get('Industry', 'Microcap')
-        except Exception as e:
-            print(f"Failed to fetch index: {url} | {e}")
-
-    fetch_indices("https://archives.nseindia.com/content/indices/ind_nifty500list.csv", 'Industry')
-    fetch_indices("https://archives.nseindia.com/content/indices/ind_niftymicrocap250_list.csv", 'Microcap')
-    
-    return list(tickers)
-
-def clean_liquidity(prices, volumes):
-    """Filters out stocks with low turnover or dead price action."""
-    valid_cols = []
-    # turnover approx = price * volume
-    turnover = prices * volumes
-    avg_turnover = turnover.median()
-    
-    for col in prices.columns:
-        try:
-            # 1. Turnover Check
-            if avg_turnover[col] < MIN_TURNOVER: continue
-            
-            # 2. Data Length Check
-            series = prices[col].dropna()
-            if len(series) < 250: continue 
-            
-            # 3. Dead Stock Check (Zeros or no movement)
-            pct_change = series.pct_change().fillna(0)
-            if (pct_change == 0).sum() > (len(series) * 0.20): continue # Too many flat days
-            if pct_change.abs().median() < 0.0001: continue # Too stable (likely debt/preference share)
-            
-            valid_cols.append(col)
-        except:
-            continue
-            
-    return prices[valid_cols]
-
-def download_batched(tickers):
-    all_data = []
-    print(f"Starting download for {len(tickers)} stocks...")
-    
-    for i in range(0, len(tickers), BATCH_SIZE):
-        batch = tickers[i : i + BATCH_SIZE]
-        try:
-            # Threaded download is faster
-            df = yf.download(batch, period=f"{LOOKBACK_YEARS}y", progress=False, threads=True, auto_adjust=True)
-            
-            # yfinance returns MultiIndex if multiple tickers
-            if isinstance(df.columns, pd.MultiIndex):
-                clean_batch = clean_liquidity(df['Close'], df['Volume'])
-                if not clean_batch.empty:
-                    all_data.append(clean_batch)
-        except Exception as e:
-            print(f"Batch {i} error: {e}")
-        
-        # Polite delay to avoid rate limits
-        time.sleep(0.5)
-            
-    if not all_data: return pd.DataFrame()
-    return pd.concat(all_data, axis=1)
-
-def update_cache():
-    global SYSTEM_STATUS, DATA_READY
-    SYSTEM_STATUS = "Syncing Data..."
-    
-    if os.path.exists(CACHE_FILE):
-        print("Loading from cache...")
-        df = pd.read_csv(CACHE_FILE, index_col=0, parse_dates=True)
-    else:
-        print("Cache not found, downloading fresh data...")
-        all_tickers = get_liquid_universe()
-        df = download_batched(all_tickers)
-        # Remove duplicate columns if any
-        df = df.loc[:, ~df.columns.duplicated()]
-        df.to_csv(CACHE_FILE)
-        
-    DATA_READY = True
-    SYSTEM_STATUS = f"Ready ({len(df.columns)} Stocks)"
-    return df
-
-def calculate_rolling_hedge_ratio(y, x, window=60):
-    """Calculates dynamic beta (hedge ratio) to avoid look-ahead bias."""
-    cov = y.rolling(window=window).cov(x)
-    var = x.rolling(window=window).var()
-    return (cov / var).fillna(1.0)
-
-def fit_ou_process(spread):
-    """Fits Ornstein-Uhlenbeck process to estimate Mean Reversion speed."""
-    try:
-        spread_np = spread.values
-        x = spread_np[:-1]
-        y = spread_np[1:]
-        
-        # Regress S(t) against S(t-1)
-        model = sm.OLS(y, sm.add_constant(x)).fit()
-        beta = model.params[1]
-        
-        # Calculate parameters
-        theta = -np.log(beta)
-        half_life = int(np.log(2) / theta)
-        mu = model.params[0] / (1 - beta) # Equilibrium level
-        
-        return max(1, half_life), mu
-    except:
-        return 99, spread.mean()
-
-def scan_market(data):
-    # 1.Vectorized Correlation
-    corr_matrix = data.corr().abs()
-    
-    # Filter upper triangle only to avoid duplicates
-    mask = np.triu(np.ones(corr_matrix.shape), k=1).astype(bool)
-    candidates = corr_matrix.where(mask).stack()
-    candidates = candidates[candidates > MIN_CORR]
-    
-    results = []
-    
-    # 2.Detailed Checks (Cointegration & Hurst)
-    for t1, t2 in candidates.index.tolist():
-        try:
-            s1 = data[t1].dropna()
-            s2 = data[t2].dropna()
-            
-            # Sync dates
-            common = s1.index.intersection(s2.index)
-            if len(common) < 150: continue
-            
-            # Cointegration Test (Engle-Granger)
-            score, p_val, _ = coint(s1[common], s2[common])
-            
-            if p_val < 0.05:
-                # Hurst Exponent (Mean Reversion Speed)
-                spread = s1[common] / s2[common]
-                lags = range(2, 20)
-                # Calculate variance of differences
-                tau = [np.sqrt(np.std(np.subtract(spread.values[lag:], spread.values[:-lag]))) for lag in lags]
-                hurst = np.polyfit(np.log(lags), np.log(tau), 1)[0] * 2.0
-                
-                if hurst < MAX_HURST:
-                    results.append({
-                        "t1": t1, "t2": t2, 
-                        "correlation": round(candidates[(t1, t2)], 3), 
-                        "p_value": round(float(p_val), 5), 
-                        "hurst": round(float(hurst), 3), 
-                        "sector": SECTOR_MAP.get(t1, "Market")
-                    })
-        except:
-            continue
-            
-    return sorted(results, key=lambda x: x['hurst'])
-
-# API
 
 app = FastAPI()
-market_data = None
+
+# Absolute path for Docker/Cloud environments
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+templates = Jinja2Templates(directory=BASE_DIR)
+
+class GlobalState:
+    def __init__(self):
+        self.status = "BOOTING..."
+        self.progress = 0
+        self.ready = False
+        self.data = pd.DataFrame()
+        self.sector_map = {}
+        self.pairs_pool = []
+
+state = GlobalState()
+
+class SafeJSON(JSONResponse):
+    def render(self, content) -> bytes:
+        def clean(obj):
+            if isinstance(obj, dict): return {k: clean(v) for k, v in obj.items()}
+            if isinstance(obj, list): return [clean(x) for x in obj]
+            if isinstance(obj, float):
+                if np.isnan(obj) or np.isinf(obj): return 0.0
+            return obj
+        return json.dumps(clean(content)).encode("utf-8")
 
 class AnalyzeRequest(BaseModel):
     t1: str
     t2: str
-    z_threshold: float = 2.0 
+
+def get_copula_score(z_series):
+    """Maps residuals to a uniform space to find tail-end dependency probabilities."""
+    if len(z_series) < 30: return 0.5
+    u = rankdata(z_series) / (len(z_series) + 1)
+    return u[-1]
+
+def calculate_validity(z_series, p_oos, hurst, alpha_bonf):
+    """Aggregates p-values, mean-reversion persistence, and tail-risk into a validity %."""
+    p_score = 50 if p_oos < alpha_bonf else (np.interp(p_oos, [alpha_bonf, 0.05], [40, 0]))
+    h_score = np.interp(hurst, [0.3, 0.5, 0.6], [30, 10, 0])
+    k_score = np.interp(abs(kurtosis(z_series.dropna())), [0, 3, 6], [20, 10, 0])
+    return int(p_score + h_score + k_score)
+
+def run_friction_mc(z_series, steps=15, sims=500):
+    """Simulates 500 future paths with volatility-adjusted transaction friction."""
+    recent = z_series.tail(30)
+    y, x = recent.values[1:], recent.values[:-1]
+    res = np.polyfit(x, y, 1)
+    lambda_hat, sigma_hat = np.clip(1 - res[0], 0.02, 0.8), np.std(y - (res[0] * x + res[1]))
+    friction = sigma_hat * 0.05 
+    last_z, paths = z_series.iloc[-1], np.zeros((sims, steps))
+    for i in range(sims):
+        curr = last_z
+        for t in range(steps):
+            curr += lambda_hat * (0 - curr) + sigma_hat * np.random.normal() + (friction if curr < 0 else -friction)
+            paths[i, t] = curr
+    return {"upper": np.percentile(paths, 95, axis=0).tolist(), "lower": np.percentile(paths, 5, axis=0).tolist()}, round((np.sum(np.any(np.abs(paths) < 0.1, axis=1)) / sims) * 100, 1)
+
+def kalman_filter_spread(y, x):
+    """Estimates a dynamic hedge ratio using a recursive state-space model."""
+    obs_mat = np.vstack([x, np.ones(len(x))]).T[:, np.newaxis]
+    delta, obs_cov = 1e-5, 1e-3
+    trans_cov = delta / (1 - delta) * np.eye(2)
+    state_means, m, c = np.zeros((len(y), 2)), np.zeros(2), np.ones((2, 2))
+    for i in range(len(y)):
+        c += trans_cov
+        v = y[i] - np.dot(obs_mat[i], m)
+        F = np.dot(obs_mat[i], np.dot(c, obs_mat[i].T)) + obs_cov
+        K = np.dot(c, obs_mat[i].T) / (F + 1e-10)
+        m += K.flatten() * v
+        c -= np.dot(K, np.dot(obs_mat[i], c))
+        state_means[i] = m
+    return state_means[:, 0], state_means[:, 1]
+
+def sync_market_data():
+    """Builds a ~730+ stock universe by merging Nifty 500 and Smallcap 250."""
+    state.status = "FETCHING"
+    combined_tickers = []
+    sources = [
+        "https://archives.nseindia.com/content/indices/ind_nifty500list.csv",
+        "https://archives.nseindia.com/content/indices/ind_niftysmallcap250list.csv"
+    ]
+    for url in sources:
+        try:
+            r = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'})
+            df = pd.read_csv(io.StringIO(r.text))
+            for _, row in df.iterrows():
+                sym = f"{row['Symbol'].strip()}.NS"
+                combined_tickers.append(sym)
+                state.sector_map[sym] = row.get('Industry', 'Market')
+        except: continue
+
+    tickers = sorted(list(set(combined_tickers))) 
+    all_data = []
+    
+    for i in range(0, len(tickers), 50):
+        state.progress = int((i/len(tickers)) * 50)
+        batch = yf.download(tickers[i:i+50], period="2y", progress=False)
+        if not batch.empty and 'Close' in batch: all_data.append(batch['Close'])
+        time.sleep(0.05)
+
+    state.data = pd.concat(all_data, axis=1).dropna(thresh=250, axis=1).ffill().iloc[-500:]
+    state.status = "VALIDATING"
+    
+    # Walk-forward: test cointegration in IS period, verify in OOS period
+    split = int(len(state.data) * 0.75)
+    f_data, v_data = state.data.iloc[:split], state.data.iloc[split:]
+    corr_matrix = f_data.corr()
+    indices = np.where((corr_matrix.values > 0.4) & (corr_matrix.values < 0.99))
+    unique_idx = sorted(list(set(tuple(sorted((i, j))) for i, j in zip(*indices) if i != j)))
+    alpha_bonf = 0.05 / len(unique_idx) if unique_idx else 0.05
+
+    pairs = []
+    for idx, (i, j) in enumerate(unique_idx):
+        state.progress = 50 + int((idx / len(unique_idx)) * 50)
+        t1, t2 = state.data.columns[i], state.data.columns[j]
+        try:
+            _, p_is, _ = coint(f_data[t1], f_data[t2])
+            if p_is < 0.05:
+                _, p_oos, _ = coint(v_data[t1], v_data[t2])
+                if p_oos < 0.15:
+                    spread = state.data[t1] / state.data[t2]
+                    hurst = np.polyfit(np.log(range(2, 20)), [np.sqrt(np.std(np.subtract(spread.values[l:], spread.values[:-l]))) for l in range(2, 20)], 1)[0] * 2.0
+                    z_series = (spread - spread.mean()) / (spread.std() + 1e-10)
+                    validity = calculate_validity(z_series, p_oos, hurst, alpha_bonf)
+                    
+                    r1, r2 = state.data[t1].pct_change().fillna(0), state.data[t2].pct_change().fillna(0)
+                    corrs = [r1.shift(l).corr(r2) for l in range(-5, 6)]
+                    best_lag = range(-5, 6)[np.nanargmax(np.abs(corrs))]
+                    lag_label = "SYNC" if best_lag == 0 else (f"{t1.split('.')[0]} LEADS" if best_lag > 0 else f"{t2.split('.')[0]} LEADS")
+
+                    s1, s2 = state.sector_map.get(t1, "Market"), state.sector_map.get(t2, "Market")
+                    pairs.append({
+                        "t1": t1, "t2": t2, "validity": validity, "correlation": round(float(corr_matrix.loc[t1, t2]), 3),
+                        "lead": lag_label,
+                        "sector": f"{s1} (INTRA)" if s1 == s2 else f"{s1[:5]}/{s2[:5]} (INTER)"
+                    })
+            if len(pairs) >= 150: break 
+        except: continue
+    state.pairs_pool = pairs; state.ready, state.progress, state.status = True, 100, "READY"
 
 @app.on_event("startup")
 async def startup():
-    # Auto-open browser
-    webbrowser.open(f"http://{HOST}:{PORT}")
-    # Load data in background
-    threading.Thread(target=lambda: globals().update(market_data=update_cache())).start()
+    threading.Thread(target=sync_market_data, daemon=True).start()
 
 @app.get("/status")
-async def get_status():
-    return {"status": SYSTEM_STATUS, "ready": DATA_READY}
+async def get_status(): return {"status": state.status, "progress": state.progress, "ready": state.ready}
 
-@app.get("/")
-async def get_ui():
-    return FileResponse('index.html')
+@app.get("/", response_class=HTMLResponse)
+async def home(request: Request):
+    return templates.TemplateResponse("index.html", {"request": request})
 
 @app.post("/scan")
-async def scan():
-    if not DATA_READY: return {"error": "Processing..."}
-    return {"pairs": scan_market(market_data)}
+async def scan(): return {"pairs": state.pairs_pool}
 
-@app.post("/analyze")
+@app.post("/analyze", response_class=SafeJSON)
 async def analyze(req: AnalyzeRequest):
     try:
-        # Data Prep
-        p1 = market_data[req.t1].dropna()
-        p2 = market_data[req.t2].dropna()
-        common = p1.index.intersection(p2.index)
-        p1, p2 = p1[common], p2[common]
-        
-        # 1.Rolling Stats
-        rolling_hr = calculate_rolling_hedge_ratio(p1, p2, window=ROLLING_WINDOW)
-        spread = p1 - (rolling_hr * p2)
-        
-        rolling_mean = spread.rolling(window=ROLLING_WINDOW).mean()
-        rolling_std = spread.rolling(window=ROLLING_WINDOW).std()
-        z_score = (spread - rolling_mean) / rolling_std
-        
-        # 2.Clean NaN (Lookback period)
-        valid_idx = z_score.dropna().index
-        z_score = z_score.loc[valid_idx]
-        p1, p2 = p1.loc[valid_idx], p2.loc[valid_idx]
-        rolling_hr = rolling_hr.loc[valid_idx]
-
-        # 3.Signals
-        thresh = req.z_threshold
-        signals = pd.Series(0, index=valid_idx)
-        signals[z_score > thresh] = -1 # Short Spread
-        signals[z_score < -thresh] = 1 # Long Spread
-        signals[abs(z_score) < 0.5] = 0 # Exit
-        
-        # 4.Backtest (Shift 1 to avoid lookahead)
-        pos = signals.replace(0, np.nan).ffill().fillna(0)
-        asset_ret = p1.pct_change() - (rolling_hr.shift(1) * p2.pct_change())
-        strat_ret = pos.shift(1) * asset_ret
-        equity = (1 + strat_ret.fillna(0)).cumprod()
-        
-        # 5.Metadata
-        half_life, ou_mean = fit_ou_process(spread)
-        
-        # JSON Prep (Handle NaNs for JS)
-        def clean_series(s): return s.replace({np.nan: None}).tolist()
-        
+        s1, s2 = state.data[req.t1], state.data[req.t2]
+        beta, alpha = kalman_filter_spread(s1.values, s2.values)
+        z = pd.Series(s1.values - (beta * s2.values + alpha))
+        z_score = ((z - z.rolling(30).mean()) / (z.rolling(30).std() + 1e-10)).fillna(0)
+        pair_info = next((p for p in state.pairs_pool if p['t1'] == req.t1 and p['t2'] == req.t2), {"lead": "SYNC"})
+        mc_res, prob = run_friction_mc(z_score)
         return {
-            "dates": valid_idx.strftime('%Y-%m-%d').tolist(),
-            "norm_price1": clean_series((p1 / p1.iloc[0]) - 1),
-            "norm_price2": clean_series((p2 / p2.iloc[0]) - 1),
-            "mi": clean_series((z_score - z_score.min()) / (z_score.max() - z_score.min())),
-            "equity": clean_series(equity),
-            "stats": {
-                "hedge_ratio": round(float(rolling_hr.iloc[-1]), 4), 
-                "half_life": int(half_life), 
-                "ou_target": round(float(ou_mean), 4),
-                "current_z": round(float(z_score.iloc[-1]), 2), 
-                "sharpe": round(float((strat_ret.mean() / strat_ret.std()) * np.sqrt(252)), 2) if strat_ret.std() != 0 else 0
-            }
+            "dates": state.data.index.strftime('%Y-%m-%d').tolist(),
+            "p1": (((s1 / s1.iloc[0]) - 1) * 100).tolist(), "p2": (((s2 / s2.iloc[0]) - 1) * 100).tolist(),
+            "z": z_score.tolist(), "mc": mc_res,
+            "prices": {"p1": s1.iloc[-1], "p2": s2.iloc[-1]},
+            "stats": {"hr": round(float(beta[-1]), 3), "copula": round(float(get_copula_score(z_score)), 3), "prob": prob, "lead": pair_info['lead']}
         }
-    except Exception as e:
-        traceback.print_exc()
-        return {"error": "Analysis Failed"}
+    except: return {"error": "FAILED"}
 
 if __name__ == "__main__":
-    uvicorn.run(app, host=HOST, port=PORT)
+    uvicorn.run(app, host="0.0.0.0", port=7860)
