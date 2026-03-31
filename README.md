@@ -18,13 +18,24 @@ To account for non-normal distributions and fat-tails in financial spreads, the 
 * **Copula Score**: Calculated using rank-order distributions to determine the "Copula Probability".
 * **Objective**: This provides a rigorous measure of divergence by identifying statistical extremes regardless of the underlying distribution's shape.
 
-### 3. Walk-Forward Validation
+### 3. Hurst Exponent Analysis
+To quantify the strength of the mean-reverting behavior, the pipeline calculates the Hurst exponent ($H$) on the spread before ranking.
+* **Thresholds**: $H < 0.5$ indicates a mean-reverting series, while $H > 0.5$ suggests a trending series.
+* **Implementation**: Computed using the variance of differences at multiple lag windows (from 2 to 19 days) via log-log regression.
+* **Weighting**: This metric accounts for up to 30% of the pair's final validity score, heavily penalizing spreads that wander rather than revert.
+
+### 4. Kurtosis Scoring (Tail Magnitude)
+Financial spreads often exhibit non-normal distributions. The system actively rewards pairs with high kurtosis (fat tails) in their spread distribution.
+* **Objective**: Higher kurtosis implies that when the spread deviates, the magnitude of the divergence (and therefore the potential arbitrage profit) is larger.
+* **Weighting**: The kurtosis metric contributes up to 20% of the final validity score, prioritizing explosive mean-reversion setups over tight, low-volatility tracking.
+
+### 5. Walk-Forward Validation
 To mitigate look-ahead bias and overfitting, the engine implements a 75/25 temporal split across the two-year lookback:
 * **Formation Period (75%)**: Identifies initial cointegration via the Engle-Granger test.
 * **Validation Period (25%)**: Verifies that the cointegration relationship survives a regime shift.
 * **Filtering**: Pairs failing to maintain stationarity in the out-of-sample period are discarded.
 
-### 4. Lead-Lag Detection
+### 6. Lead-Lag Detection
 The system calculates cross-correlation of log returns across 11 lags from -5 to +5 days.
 * **Formula**: $$Corr(r_{1,t-l}, r_{2,t})$$
 * **Outcome**: This identifies whether one asset leads the other, providing a directional bias for entries.
