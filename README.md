@@ -1,74 +1,69 @@
 # Copula.Ops | Statistical Arbitrage Terminal
 
-A high-fidelity research environment designed for alpha discovery within the Nifty 750 universe. This terminal identifies high-probability mean-reversion opportunities by moving beyond static models toward state-space estimation and tail-dependency analysis.
+A statistical arbitrage terminal for the Nifty 750 universe. The system identifies mean-reversion setups using state-space estimation and tail-dependency analysis.
 
 ![Terminal Dashboard](Demo.png)
 
-## Core Quantitative Architecture
+## Quantitative Architecture
 
 ### 1. Dynamic State Estimation (Kalman Filter)
-The engine utilizes a Recursive Kalman Filter to estimate the hedge ratio between two assets. Unlike static Ordinary Least Squares (OLS) regressions, this approach treats the hedge ratio as a hidden state that evolves over time. This allows the model to adjust for changing market regimes and maintain accurate residuals.
-
+The system uses a Recursive Kalman Filter to estimate the hedge ratio between two assets over time, rather than a static Ordinary Least Squares (OLS) regression.
 * **State Transition**: $$x_t = A x_{t-1} + w_t$$
 * **Observation**: $$z_t = H x_t + v_t$$
 
 ### 2. Tail-Dependency Modeling (Empirical Copula)
-To account for non-normal distributions and fat-tails in financial spreads, the model applies a Probability Integral Transform (PIT) to the residuals. 
-* **Uniform Mapping**: Residuals are mapped into a uniform space [0, 1].
-* **Copula Score**: Calculated using rank-order distributions to determine the "Copula Probability".
-* **Objective**: This provides a rigorous measure of divergence by identifying statistical extremes regardless of the underlying distribution's shape.
+A Probability Integral Transform (PIT) is applied to the residuals to account for non-normal distributions.
+* **Uniform Mapping**: Residuals are mapped to a uniform space [0, 1].
+* **Copula Score**: Calculated via rank-order distributions to determine tail dependence.
 
 ### 3. Hurst Exponent Analysis
-To quantify the strength of the mean-reverting behavior, the pipeline calculates the Hurst exponent ($H$) on the spread before ranking.
-* **Thresholds**: $H < 0.5$ indicates a mean-reverting series, while $H > 0.5$ suggests a trending series.
-* **Implementation**: Computed using the variance of differences at multiple lag windows (from 2 to 19 days) via log-log regression.
-* **Weighting**: This metric accounts for up to 30% of the pair's final validity score, heavily penalizing spreads that wander rather than revert.
+The Hurst exponent ($H$) evaluates the mean-reverting property of the spread.
+* **Thresholds**: $H < 0.5$ indicates mean-reversion; $H > 0.5$ indicates a trend.
+* **Implementation**: Calculated using the variance of differences at lag windows from 2 to 19 days via log-log regression.
+* **Weighting**: Contributes up to 30% of the validity score.
 
-### 4. Kurtosis Scoring (Tail Magnitude)
-Financial spreads often exhibit non-normal distributions. The system actively rewards pairs with high kurtosis (fat tails) in their spread distribution.
-* **Objective**: Higher kurtosis implies that when the spread deviates, the magnitude of the divergence (and therefore the potential arbitrage profit) is larger.
-* **Weighting**: The kurtosis metric contributes up to 20% of the final validity score, prioritizing explosive mean-reversion setups over tight, low-volatility tracking.
+### 4. Kurtosis Scoring
+The system factors in the kurtosis of the spread distribution.
+* **Objective**: Higher kurtosis indicates a higher probability of extreme deviations (fat tails).
+* **Weighting**: Contributes up to 20% of the validity score.
 
 ### 5. Walk-Forward Validation
-To mitigate look-ahead bias and overfitting, the engine implements a 75/25 temporal split across the two-year lookback:
-* **Formation Period (75%)**: Identifies initial cointegration via the Engle-Granger test.
-* **Validation Period (25%)**: Verifies that the cointegration relationship survives a regime shift.
-* **Filtering**: Pairs failing to maintain stationarity in the out-of-sample period are discarded.
+A 75/25 split is applied to the two-year lookback period.
+* **Formation (75%)**: Engle-Granger test for initial cointegration.
+* **Validation (25%)**: Out-of-sample testing to confirm stationarity. Pairs failing this phase are excluded.
 
 ### 6. Lead-Lag Detection
-The system calculates cross-correlation of log returns across 11 lags from -5 to +5 days.
+Cross-correlation of log returns is calculated across 11 lags (-5 to +5 days) to identify directional bias.
 * **Formula**: $$Corr(r_{1,t-l}, r_{2,t})$$
-* **Outcome**: This identifies whether one asset leads the other, providing a directional bias for entries.
 
 ---
 
-## Operational Infrastructure
+## Infrastructure
 
-### Data Pipeline and Universe
-* **Construction**: Merges the Nifty 500 and Nifty Smallcap 250 lists directly from NSE archives.
-* **Lookback**: Fetches 2 years of daily data (approximately 500 trading days).
-* **Batching**: Downloads via yfinance in 50-stock chunks to manage rate limits and memory.
-* **Background Sync**: A monitor loop refreshes the entire universe and re-calculates cointegration every 4 hours.
+### Data Pipeline
+* **Universe**: Merges Nifty 500 and Nifty Smallcap 250 lists from NSE archives.
+* **Lookback**: 2 years of daily data (~500 trading days).
+* **Batching**: Data is downloaded via `yfinance` in 50-stock chunks.
+* **Sync**: A background loop recalculates the universe every 4 hours.
 
 ### Execution Logic
-* **Signal Generation**: Entry signals are based on a 30-day rolling Z-score of the Kalman residuals.
-* **Monte Carlo Projection**: Runs 500-path simulations using the Euler-Maruyama method to estimate reversion probability within a 15-day window.
-* **Friction Model**: Simulations incorporate a "Dynamic Friction" penalty based on historical volatility to account for slippage and costs.
-* **Dynamic Sizing**: Calculates position sizes (BUY X / SELL Y) to neutralize the spread based on the live Kalman hedge ratio.
+* **Signals**: Based on a 30-day rolling Z-score of Kalman residuals.
+* **Monte Carlo**: 500-path simulation using the Euler-Maruyama method over a 15-day window.
+* **Friction Penalty**: A fixed penalty based on historical volatility is applied to simulated paths to approximate slippage.
+* **Sizing**: Position sizes are calculated to neutralize the spread based on the live hedge ratio.
 
-### Multiple Testing Bias
-Given the complexity of a 750-stock matrix, the system applies a Bonferroni Correction to prevent Type I errors.
+### Bonferroni Correction
+Applied to the Engle-Granger test to control the family-wise error rate across multiple comparisons.
 * **Adjusted Alpha**: $$\alpha = 0.05 / N_{unique\_idx}$$
 
 ---
 
 ## Technical Stack
 
-* **Backend**: FastAPI for asynchronous endpoint handling.
-* **Processing**: NumPy, Pandas, Statsmodels, and SciPy for vectorized math and statistics.
-* **Frontend**: Vanilla JS, Plotly.js, and Bootstrap 5.
-* **API Stability**: Custom SafeJSON class to handle NaN and Inf values inherent in quant data.
-* **Deployment**: Containerized via Docker using Python 3.11-slim.
+* **Backend**: FastAPI, Python 3.11.
+* **Processing**: NumPy, Pandas, Statsmodels, SciPy.
+* **Frontend**: Vanilla JS, Plotly.js, Bootstrap 5.
+* **Deployment**: Docker.
 
 ## Deployment
 ```bash
